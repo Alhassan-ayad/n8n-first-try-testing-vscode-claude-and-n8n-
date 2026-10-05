@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+@theme {
+  --color-gold-50: #fbf7ec;
+  --color-gold-100: #f4ead0;
+  --color-gold-500: #b8932f;
+  --color-gold-600: #8a6d1f;
+  --color-gold-700: #6d5618;
+  --color-ink: #1d1a14;
+}
+
+html, body, #root { height: 100%; }
+body { @apply bg-stone-50 text-stone-900 antialiased; font-family: "Segoe UI", system-ui, -apple-system, Tahoma, sans-serif; }
+.rtl { direction: rtl; text-align: right; }

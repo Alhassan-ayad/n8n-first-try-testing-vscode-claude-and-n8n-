@@ -1,0 +1,122 @@
+# mngm Client Engagement Platform
+#   docker compose up -d --build        → full stack
+#   Console: http://localhost:8080      API: http://localhost:3000 (docs at /docs)
+#
+# The `mssql` service hosts BOTH the platform DB (mngm_cep) and a simulated
+# mngm core DB (mngm_core, CDC enabled) for local testing. In production,
+# set SOURCE_MSSQL_URL to the real mngm core server and DATABASE_URL to the
+# platform's own database, and drop the mssql/mssql-init services.
+
+x-app-env: &app-env
+  env_file: .env
+  environment:
+    DATABASE_URL: "sqlserver://mssql:1433;database=mngm_cep;user=sa;password=${MSSQL_SA_PASSWORD:-Cep_Local_Passw0rd!};trustServerCertificate=true"
+    SOURCE_MSSQL_URL: "${SOURCE_MSSQL_URL_DOCKER:-Server=mssql,1433;Database=mngm_core;User Id=sa;Password=Cep_Local_Passw0rd!;Encrypt=true;TrustServerCertificate=true}"
+    REDIS_URL: redis://redis:6379
+    API_PORT: "3000"
+    TZ: Africa/Cairo
+
+services:
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-Cep_Local_Passw0rd!}
+      MSSQL_AGENT_ENABLED: "true" # required for CDC capture jobs
+      MSSQL_PID: Developer
+      TZ: Etc/UTC
+    ports:
+      - "${MSSQL_HOST_PORT:-1433}:1433"
+    volumes:
+      - mssql-data:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$${MSSQL_SA_PASSWORD}\" -C -Q 'SELECT 1' -b -o /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  mssql-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    depends_on:
+      mssql:
+        condition: service_healthy
+    volumes:
+      - ./docker/mssql:/init:ro
+    environment:
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-Cep_Local_Passw0rd!}
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        /opt/mssql-tools18/bin/sqlcmd -S mssql -U sa -P "$${MSSQL_SA_PASSWORD}" -C -b -i /init/01-create-dbs.sql &&
+        /opt/mssql-tools18/bin/sqlcmd -S mssql -U sa -P "$${MSSQL_SA_PASSWORD}" -C -b -i /init/02-source-sim.sql &&
+        echo "mssql init done"
+    restart: "no"
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+
+  migrate:
+    build: .
+    <<: *app-env
+    depends_on:
+      mssql-init:
+        condition: service_completed_successfully
+    command: ["sh", "-c", "npx prisma migrate deploy --schema packages/db/prisma/schema.prisma && npx tsx packages/db/src/seed/index.ts"]
+    restart: "no"
+
+  api:
+    build: .
+    <<: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    command: ["npx", "tsx", "apps/api/src/server.ts"]
+    ports:
+      - "${API_HOST_PORT:-3000}:3000"
+    volumes:
+      - ./secrets:/app/secrets:ro
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  worker:
+    build: .
+    <<: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    command: ["npx", "tsx", "apps/worker/src/main.ts"]
+    volumes:
+      - ./secrets:/app/secrets:ro
+    restart: unless-stopped
+
+  console:
+    build:
+      context: .
+      dockerfile: apps/console/Dockerfile
+    depends_on:
+      - api
+    ports:
+      - "${CONSOLE_HOST_PORT:-8080}:80"
+    restart: unless-stopped
+
+volumes:
+  mssql-data:
+  redis-data:

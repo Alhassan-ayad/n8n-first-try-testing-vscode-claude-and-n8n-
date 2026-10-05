@@ -1,0 +1,542 @@
+// mngm Client Engagement Platform — own database (SQL Server).
+// SQL Server has no enums / Json / scalar lists in Prisma, so enumerations are
+// strings validated in code (see packages/core/src/types.ts) and structured
+// payloads are JSON stored in NVarChar(Max).
+// All relations use NoAction to avoid SQL Server multiple-cascade-path errors.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+// ── Single client view ──────────────────────────────────────────────────────
+
+model Client {
+  id               String    @id @default(uuid())
+  externalId       String    @unique // mngm core Users.Id
+  fullName         String?
+  phone            String?
+  email            String?
+  language         String    @default("ar") // ar | en
+  lifecycleStage   String    @default("S1") // S1..S8
+  valueTier        String    @default("entry") // entry | core | premium | private
+  tags             String    @default("") @db.NVarChar(2000) // comma-separated overlay tags
+  source           String    @default("organic")
+  kycStatus        String    @default("none") // none | submitted | approved | rejected
+  kycRejectCount   Int       @default(0)
+  orderCount       Int       @default(0)
+  avgOrderAmount   Float     @default(0)
+  goldGrams        Float     @default(0)
+  silverGrams      Float     @default(0)
+  holdingValueEgp  Float     @default(0)
+  cashBalanceEgp   Float     @default(0)
+  hasRecurringPlan Boolean   @default(false)
+  registeredAt     DateTime  @default(now())
+  activatedAt      DateTime?
+  firstOrderAt     DateTime?
+  lastOrderAt      DateTime?
+  lastLoginAt      DateTime?
+  closedAt         DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  devices      Device[]
+  consents     Consent[]
+  consentAudit ConsentAudit[]
+  messages     Message[]
+  inbox        InboxItem[]
+  priceAlerts  PriceAlert[]
+  enrollments  JourneyEnrollment[]
+  callTasks    CallTask[]
+  surveys      SurveyResponse[]
+  holdouts     HoldoutAssignment[]
+
+  @@index([lifecycleStage])
+  @@index([valueTier])
+  @@index([phone])
+  @@index([email])
+}
+
+model Device {
+  id            String    @id @default(uuid())
+  clientId      String
+  token         String    @unique @db.NVarChar(450)
+  platform      String    @default("android") // android | ios | web
+  appVersion    String?
+  lastSeenAt    DateTime  @default(now())
+  invalidatedAt DateTime?
+  createdAt     DateTime  @default(now())
+  client        Client    @relation(fields: [clientId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([clientId])
+}
+
+// ── Consent, preferences and suppression ────────────────────────────────────
+
+model Consent {
+  id             String   @id @default(uuid())
+  clientId       String
+  channel        String // email | sms | push | whatsapp | call
+  topic          String // price_daily | price_alerts | market_research | lifecycle | promotions | education | feedback
+  granted        Boolean
+  source         String // registration | preference_centre | admin | sms_keyword | email_unsubscribe | api
+  wordingVersion String?
+  updatedAt      DateTime @updatedAt
+  createdAt      DateTime @default(now())
+  client         Client   @relation(fields: [clientId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([clientId, channel, topic])
+}
+
+// Immutable audit of every consent change (PDPL 151/2018)
+model ConsentAudit {
+  id             String   @id @default(uuid())
+  clientId       String
+  channel        String
+  topic          String
+  granted        Boolean
+  source         String
+  wordingVersion String?
+  wordingText    String?  @db.NVarChar(Max)
+  ip             String?
+  actor          String?
+  createdAt      DateTime @default(now())
+  client         Client   @relation(fields: [clientId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([clientId, createdAt])
+}
+
+// Single authoritative do-not-contact list consumed by every channel
+model Suppression {
+  id        String    @id @default(uuid())
+  channel   String // email | sms | push | whatsapp | call | all
+  value     String    @db.NVarChar(450) // email address, E.164 phone, or client id
+  scope     String    @default("marketing") // marketing | all  (all = invalid destination, blocks transactional too)
+  reason    String // unsubscribe | bounce | spam_report | sms_keyword | manual | complaint
+  source    String?
+  clientId  String?
+  note      String?   @db.NVarChar(1000)
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@unique([channel, value, scope])
+  @@index([clientId])
+}
+
+model PriceAlert {
+  id              String    @id @default(uuid())
+  clientId        String
+  metal           String // gold | silver
+  direction       String // above | below
+  level           Float
+  repeat          Boolean   @default(false)
+  active          Boolean   @default(true)
+  smsAlso         Boolean   @default(false)
+  windowStart     String? // HH:mm, null = default 08:00
+  windowEnd       String? // HH:mm, null = default 23:00
+  lastTriggeredAt DateTime?
+  createdAt       DateTime  @default(now())
+  client          Client    @relation(fields: [clientId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([metal, active])
+}
+
+// ── Content ─────────────────────────────────────────────────────────────────
+
+model Template {
+  id           String    @id @default(uuid())
+  key          String // e.g. order_executed
+  channel      String // email | sms | push | inapp | whatsapp
+  language     String // ar | en
+  version      Int       @default(1)
+  category     String // A..F
+  topic        String // see Consent.topic, plus transactional | service_notice
+  subject      String?   @db.NVarChar(500)
+  title        String?   @db.NVarChar(500)
+  body         String    @db.NVarChar(Max)
+  html         String?   @db.NVarChar(Max)
+  deepLink     String?   @db.NVarChar(1000)
+  imageUrl     String?   @db.NVarChar(1000)
+  status       String    @default("draft") // draft | in_review | approved | rejected | retired
+  lintReport   String?   @db.NVarChar(Max)
+  owner        String?
+  submittedBy  String?
+  reviewedBy   String?
+  reviewNote   String?   @db.NVarChar(2000)
+  approvedBy   String?
+  approvedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([key, channel, language, version])
+  @@index([key, channel, language, status])
+}
+
+// ── Outbox ──────────────────────────────────────────────────────────────────
+
+model Message {
+  id                  String    @id @default(uuid())
+  clientId            String?
+  dedupeKey           String    @unique @db.NVarChar(450)
+  templateKey         String
+  templateId          String?
+  channel             String // email | sms | push | inapp | whatsapp
+  category            String // A..F
+  topic               String
+  kind                String // transactional | security | otp | client_alert | research | lifecycle | promotion | education | service | feedback
+  priority            Int // 1 = highest
+  capped              Boolean   @default(false)
+  pushTwin            Boolean   @default(false) // same content also sent by push (SMS rule, plan §4)
+  language            String    @default("ar")
+  toAddress           String?   @db.NVarChar(1000)
+  subject             String?   @db.NVarChar(500)
+  title               String?   @db.NVarChar(500)
+  body                String    @db.NVarChar(Max)
+  html                String?   @db.NVarChar(Max)
+  deepLink            String?   @db.NVarChar(1000)
+  imageUrl            String?   @db.NVarChar(1000)
+  attachments         String?   @db.NVarChar(Max) // JSON [{filename, contentBase64, type}]
+  vars                String?   @db.NVarChar(Max) // JSON
+  status              String    @default("pending") // pending | deferred | held | sending | sent | delivered | opened | clicked | failed | suppressed | cancelled
+  statusReason        String?   @db.NVarChar(1000)
+  releaseAt           DateTime?
+  notBefore           DateTime?
+  guardKey            String?   @db.NVarChar(450)
+  campaignId          String?
+  campaignSlot        String?
+  journeyEnrollmentId String?
+  journeyStepId       String?
+  provider            String?
+  providerMessageId   String?   @db.NVarChar(450)
+  attempts            Int       @default(0)
+  sentAt              DateTime?
+  deliveredAt         DateTime?
+  openedAt            DateTime?
+  clickedAt           DateTime?
+  failedAt            DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  client              Client?   @relation(fields: [clientId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  deliveryEvents      DeliveryEvent[]
+
+  @@index([clientId, channel, sentAt])
+  @@index([status, releaseAt])
+  @@index([providerMessageId])
+  @@index([campaignId])
+  @@index([journeyEnrollmentId])
+  @@index([guardKey])
+  @@index([createdAt])
+}
+
+model DeliveryEvent {
+  id         String   @id @default(uuid())
+  messageId  String?
+  provider   String
+  event      String
+  payload    String?  @db.NVarChar(Max)
+  occurredAt DateTime @default(now())
+  message    Message? @relation(fields: [messageId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([messageId])
+}
+
+model InboxItem {
+  id        String    @id @default(uuid())
+  clientId  String
+  messageId String?
+  category  String
+  title     String    @db.NVarChar(500)
+  body      String    @db.NVarChar(Max)
+  deepLink  String?   @db.NVarChar(1000)
+  imageUrl  String?   @db.NVarChar(1000)
+  readAt    DateTime?
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+  client    Client    @relation(fields: [clientId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([clientId, createdAt])
+}
+
+model Banner {
+  id        String   @id @default(uuid())
+  kind      String   @default("info") // info | offer | incident | price_feed | maintenance
+  titleEn   String   @db.NVarChar(500)
+  titleAr   String   @db.NVarChar(500)
+  bodyEn    String   @db.NVarChar(2000)
+  bodyAr    String   @db.NVarChar(2000)
+  deepLink  String?  @db.NVarChar(1000)
+  segment   String?  @db.NVarChar(Max) // JSON segment filter, null = everyone
+  startsAt  DateTime
+  endsAt    DateTime // every banner carries an end date
+  active    Boolean  @default(true)
+  createdBy String?
+  createdAt DateTime @default(now())
+
+  @@index([active, startsAt, endsAt])
+}
+
+// ── Events ──────────────────────────────────────────────────────────────────
+
+model EventLog {
+  id               String    @id @default(uuid())
+  eventId          String    @unique @db.NVarChar(450)
+  type             String
+  clientExternalId String?
+  payload          String?   @db.NVarChar(Max)
+  source           String // cdc | api | scheduler
+  occurredAt       DateTime
+  processedAt      DateTime?
+  error            String?   @db.NVarChar(Max)
+  createdAt        DateTime  @default(now())
+
+  @@index([type, occurredAt])
+  @@index([clientExternalId])
+}
+
+model CdcCheckpoint {
+  captureInstance String   @id
+  lastLsn         String // hex
+  updatedAt       DateTime @updatedAt
+}
+
+model PriceTick {
+  id         String   @id @default(uuid())
+  metal      String
+  buyPrice   Float
+  sellPrice  Float
+  stale      Boolean  @default(false)
+  occurredAt DateTime
+
+  @@index([metal, occurredAt])
+}
+
+// Marker rows for "once per day" style guards (volatility cap, dip alert, scheduled runs)
+model DailyMarker {
+  id        String   @id @default(uuid())
+  key       String   @db.NVarChar(450)
+  day       String // YYYY-MM-DD Cairo
+  count     Int      @default(1)
+  createdAt DateTime @default(now())
+
+  @@unique([key, day])
+}
+
+// ── Journeys ────────────────────────────────────────────────────────────────
+
+model Journey {
+  key       String   @id
+  enabled   Boolean  @default(true)
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+}
+
+model JourneyEnrollment {
+  id          String    @id @default(uuid())
+  journeyKey  String
+  clientId    String
+  status      String    @default("active") // active | completed | exited | cancelled
+  holdout     Boolean   @default(false)
+  enteredAt   DateTime  @default(now())
+  exitedAt    DateTime?
+  exitReason  String?
+  convertedAt DateTime?
+  context     String?   @db.NVarChar(Max) // JSON
+  client      Client    @relation(fields: [clientId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  stepRuns    JourneyStepRun[]
+
+  @@index([journeyKey, status])
+  @@index([clientId, status])
+}
+
+model JourneyStepRun {
+  id           String            @id @default(uuid())
+  enrollmentId String
+  stepId       String
+  fireAt       DateTime
+  status       String            @default("scheduled") // scheduled | done | skipped | cancelled | failed
+  result       String?           @db.NVarChar(2000)
+  executedAt   DateTime?
+  enrollment   JourneyEnrollment @relation(fields: [enrollmentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([status, fireAt])
+  @@index([enrollmentId])
+}
+
+// ── Campaigns, offers, holdouts (Appendix C registers) ──────────────────────
+
+model Segment {
+  id          String   @id @default(uuid())
+  name        String
+  description String?  @db.NVarChar(2000)
+  filter      String   @db.NVarChar(Max) // JSON SegmentFilter
+  lastCount   Int?
+  createdBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Campaign {
+  id                 String    @id @default(uuid())
+  code               String    @unique
+  name               String
+  objective          String // O1..O5
+  hypothesis         String?   @db.NVarChar(2000)
+  segmentId          String?
+  segmentFilter      String    @db.NVarChar(Max)
+  segmentSize        Int?
+  holdoutPct         Int       @default(10)
+  holdoutSize        Int?
+  channels           String // csv: push,email,sms,inapp,whatsapp
+  templateKey        String
+  topic              String // promotions | education | lifecycle | market_research
+  kind               String    @default("promotion")
+  offerId            String?
+  sendDate           String? // YYYY-MM-DD Cairo
+  slot               String? // 11:00 | 19:00
+  scheduledAt        DateTime?
+  status             String    @default("draft") // draft | in_review | approved | scheduled | running | completed | cancelled
+  complianceReviewer String?
+  complianceNote     String?   @db.NVarChar(2000)
+  approver           String?
+  approvedAt         DateTime?
+  launchedAt         DateTime?
+  completedAt        DateTime?
+  goalEvent          String    @default("order.executed")
+  attributionDays    Int       @default(7)
+  result             String?   @db.NVarChar(Max) // JSON summary vs holdout
+  decision           String? // keep | change | stop
+  decisionNote       String?   @db.NVarChar(2000)
+  createdBy          String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+}
+
+model Offer {
+  id                 String    @id @default(uuid())
+  code               String    @unique
+  name               String
+  mechanic           String // activation_bonus | spread_window | recurring_bonus | referral | threshold_bonus | storage_delivery_waiver | loyalty_tier | partner_bundle
+  eligibility        String    @db.NVarChar(Max)
+  exclusions         String?   @db.NVarChar(Max)
+  hypothesis         String?   @db.NVarChar(2000)
+  costPerRedemption  Float
+  expectedRedemption Float // 0..1
+  eligibleCount      Int       @default(0)
+  worstCaseCost      Float
+  actualRedemptions  Int?
+  actualCost         Float?
+  isNewMechanic      Boolean   @default(false)
+  touchesPricing     Boolean   @default(false)
+  metalDenominated   Boolean   @default(true)
+  hedgeReference     String?
+  holdoutPct         Int       @default(10)
+  startDate          DateTime?
+  endDate            DateTime?
+  termsUrlEn         String?   @db.NVarChar(1000)
+  termsUrlAr         String?   @db.NVarChar(1000)
+  helpCentreUrl      String?   @db.NVarChar(1000)
+  approvalTier       String? // computed: under_100k | 100k_500k | above_500k | pricing
+  requiredApprovals  String? // csv of roles
+  complianceLevel    String? // wording | full | full_legal | full_treasury
+  status             String    @default("draft") // draft | pending_approval | approved | live | ended | reviewed | rejected
+  reviewDueAt        DateTime?
+  result             String?   @db.NVarChar(Max)
+  decision           String?
+  createdBy          String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  approvals          OfferApproval[]
+}
+
+model OfferApproval {
+  id        String   @id @default(uuid())
+  offerId   String
+  role      String
+  approver  String
+  decision  String // approved | rejected
+  note      String?  @db.NVarChar(2000)
+  createdAt DateTime @default(now())
+  offer     Offer    @relation(fields: [offerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([offerId, role])
+}
+
+model HoldoutAssignment {
+  id         String   @id @default(uuid())
+  scope      String // campaign:<id> | journey:<key> | offer:<id>
+  clientId   String
+  holdout    Boolean
+  assignedAt DateTime @default(now())
+  convertedAt DateTime?
+  client     Client   @relation(fields: [clientId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([scope, clientId])
+  @@index([scope, holdout])
+}
+
+// ── Call centre ─────────────────────────────────────────────────────────────
+
+model CallTask {
+  id          String    @id @default(uuid())
+  clientId    String
+  reason      String // activation_help | large_ticket | winback | recurring_xsell | former_instalment | complaint_recovery | manual_kyc
+  journeyKey  String?
+  priority    Int       @default(5)
+  dueAt       DateTime
+  status      String    @default("open") // open | in_progress | done | cancelled
+  outcome     String? // reached_converted | reached_not_interested | reached_callback | no_answer | wrong_number | do_not_call
+  notes       String?   @db.NVarChar(2000)
+  assignedTo  String?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  client      Client    @relation(fields: [clientId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([status, dueAt])
+}
+
+// ── Surveys ─────────────────────────────────────────────────────────────────
+
+model SurveyResponse {
+  id        String   @id @default(uuid())
+  clientId  String
+  survey    String // csat_order | csat_contact | nps_quarterly | activation_dropoff | exit
+  score     Int?
+  reason    String?
+  text      String?  @db.NVarChar(Max)
+  messageId String?
+  createdAt DateTime @default(now())
+  client    Client   @relation(fields: [clientId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([survey, createdAt])
+}
+
+// ── Admin ───────────────────────────────────────────────────────────────────
+
+model AdminUser {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  name         String
+  passwordHash String
+  roles        String // csv: admin, crm, marketing, head_of_marketing, cfo, ceo, compliance, legal, treasury, research, callcentre, content, viewer
+  active       Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  actor     String
+  action    String
+  entity    String
+  entityId  String?
+  detail    String?  @db.NVarChar(Max)
+  createdAt DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([createdAt])
+}

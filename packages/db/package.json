@@ -1,0 +1,13 @@
+{
+  "name": "@cep/db",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@cep/core": "*",
+    "@prisma/client": "6.19.3",
+    "bcryptjs": "^3.0.2"
+  }
+}

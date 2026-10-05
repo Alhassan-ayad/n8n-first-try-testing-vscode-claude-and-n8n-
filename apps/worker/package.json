@@ -1,0 +1,16 @@
+{
+  "name": "@cep/worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@cep/cdc": "*",
+    "@cep/core": "*",
+    "@cep/db": "*",
+    "@cep/engine": "*",
+    "bullmq": "5.81.5"
+  }
+}
